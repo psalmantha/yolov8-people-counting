@@ -7,7 +7,7 @@ from pytube import YouTube
 VIDEO_URL = 'https://www.youtube.com/watch?v=PVUjP_I3c4Q'
 INPUT_VIDEO = 'people_entering.mov'
 OUTPUT_VIDEO = 'counting_output.mp4'
-LINE_Y = 350
+LINE_Y = 360
 MAX_DURATION_SECONDS = 60
 
 if not os.path.exists(INPUT_VIDEO):
