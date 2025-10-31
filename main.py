@@ -6,12 +6,29 @@ import numpy as _np
 from ultralytics import YOLO
 from pytube import YouTube
 
+# People counting script using YOLOv8 detections and a lightweight centroid tracker.
+#
+# 1. Run object detection (YOLOv8) on frames (optionally skip frames through DETECT_EVERY).
+# 2. Extract person bounding boxes and centroids, update a SimpleCentroidTracker to
+#    maintain stable object IDs across frames.
+# 3. For each tracked object, use the bounding-box bottom (y2) as the physical cue
+#    for crossing a horizontal counting line (LINE_Y).
+# 4. Count an object when it transitions from above->below the line (and optional
+#    stability checks pass). Also support a permissive-first-seen mode to count
+#    objects that first appear already below the line after they remain stable for
+#    a few frames, which is useful for shorter people or those who walk fast.
+# 5. Apply short-term and long-term suppression to avoid duplicate counts caused by
+#    tracker ID swaps or brief re-crossings.
+
+# The top of the file exposes tuning parameters (LINE_Y, DETECT_EVERY, etc.).
+# The most important tuning step is placing LINE_Y correctly for your camera/scene.
+
 VIDEO_URL = 'https://www.youtube.com/watch?v=PVUjP_I3c4Q'
 INPUT_VIDEO = 'people_entering.mov'
 OUTPUT_VIDEO = 'counting_output.mp4'
-LINE_Y = 950
+LINE_Y = 950 # tunable, set to approximate vertical pixel row where feet cross the doorway
 MAX_DURATION_SECONDS = 60
-DETECT_EVERY = 1
+DETECT_EVERY = 2 # adjust to 1..3 (code is currently stable for this range)
 HEADLESS = False
 
 MIN_DELTA_Y = 0
@@ -72,18 +89,22 @@ class SimpleCentroidTracker:
         oid = self.next_object_id
         self.objects[oid] = centroid
         self.disappeared[oid] = 0
+        # initialize the tracker with the maximum number of frames an object can disappear
+        # and the maximum distance for matching centroids.
         self.next_object_id += 1
 
     def deregister(self, oid):
         if oid in self.objects:
             del self.objects[oid]
         if oid in self.disappeared:
+        # register a new object with the next available integer ID.
             del self.disappeared[oid]
 
     def update(self, input_centroids):
         # input_centroids: list of (x,y)
         if len(input_centroids) == 0:
             # mark all as disappeared
+        # remove an object from tracking using its ID.
             for oid in list(self.disappeared.keys()):
                 self.disappeared[oid] += 1
                 if self.disappeared[oid] > self.max_disappeared:
@@ -94,11 +115,14 @@ class SimpleCentroidTracker:
             for c in input_centroids:
                 self.register(c)
             return self.objects.copy()
+            # if no centroids are provided, increment the disappearance count for each object
+            # and deregister those that have disappeared too long.
 
         # compute distance matrix
         object_ids = list(self.objects.keys())
         object_centroids = [self.objects[i] for i in object_ids]
         D = _np.linalg.norm(_np.array(object_centroids)[:, None, :] - _np.array(input_centroids)[None, :, :], axis=2)
+            # if no objects are currently tracked, register all input centroids.
 
         rows = D.min(axis=1).argsort()
         cols = D.argmin(axis=1)[rows]
@@ -135,6 +159,8 @@ class SimpleCentroidTracker:
 tracker = SimpleCentroidTracker(max_disappeared=30, max_distance=90)
 id_boxes = dict()       # id -> last known box coords (x1,y1,x2,y2)
 prev_centroids = dict() # id -> (x,y) previous frame centroid
+# Update the tracker with new centroids, matching them to existing objects,
+# and returning a copy of the current object mappings.
 prev_bottoms = dict()   # id -> previous bbox bottom (y2)
 below_counts = dict()   # id -> consecutive frames below line (for REQUIRE_CONSECUTIVE)
 recent_counts = []  # list of (frame_index, x, y) for recent counted events
@@ -182,6 +208,12 @@ while True:
                     cy = int((y1 + y2) / 2)
                     centroids.append((cx, cy))
                     boxes_for_centroids.append((cx, cy, x1, y1, x2, y2))
+
+        # at this point, person boxes and their centroids have been detected.
+        # the centroid tracker is updated which returns stable IDs for objects that
+        # persist across frames. stable IDs are needed because YOLO detection
+        # produces fresh box instances each frame and does not provide persistent
+        # identities.
 
         # update tracker with detected centroids and get stable IDs
         objects = tracker.update(centroids)
